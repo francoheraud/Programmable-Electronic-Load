@@ -3,15 +3,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// The OLED lives on I2C_2 (SDA_2/SCL_2), a separate physical bus from the
-// INAs on I2C_1 (which use the ESP32's built-in Wire1). The core only
-// exposes Wire/Wire1 by default, so declare our own second TwoWire -- bound
-// to the ESP32's other I2C peripheral -- so the two buses stay independent.
 TwoWire Wire2 = TwoWire(0);
-
-// -1 here means "no dedicated reset pin" -- the SSD1306 shares reset with
-// the ESP32's own reset line on most I2C modules. If your 30-pin module
-// breaks out a separate RES pin to a GPIO, pass that pin number instead.
 static Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire2, -1);
 
 Display display;

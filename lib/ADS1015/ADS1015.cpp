@@ -3,20 +3,14 @@
 
 Ads1015 ads1015;
 
-// NTC / divider constants -- same external divider topology as the heatsink
-// sensors. TODO: confirm BETA against the probe thermistor's datasheet.
-static const float NTC_FIXED_R_OHMS = 10000.0f;  // R29/R36/R37/R45, on PCB
-static const float NTC_R0_OHMS      = 10000.0f;  // NTC resistance at T0
-static const float NTC_T0_KELVIN    = 298.15f;   // 25 C reference
-static const float NTC_BETA         = 3950.0f;   // TODO: confirm from datasheet
+static const float NTC_FIXED_R_OHMS = 10000.0f;
+static const float NTC_R0_OHMS      = 10000.0f;
+static const float NTC_T0_KELVIN    = 298.15f; 
+static const float NTC_BETA         = 3950.0f; 
 
-// ADS1015 is 12-bit, left-justified in a 16-bit word (result in bits 15:4).
-// Gain=2 => full-scale = +/-2.048V, so +full-scale (0x7FF0) = 2.048V.
-// Single-ended readings are 0..+FS, i.e. raw code 0..2047 -> 0..2.048V.
 static const float ADS1015_FS_VOLTS = 2.048f;
-static const int   ADS1015_FS_CODES = 2047;      // 11 bits for single-ended +FS
+static const int   ADS1015_FS_CODES = 2047;
 
-// Config value for each channel, indexed 0..3.
 static const uint16_t kChannelConfig[4] = {
   ADS1015_CFG_AIN0, ADS1015_CFG_AIN1, ADS1015_CFG_AIN2, ADS1015_CFG_AIN3
 };
@@ -38,7 +32,7 @@ bool Ads1015::startConversion(uint8_t channel) {
 bool Ads1015::readConversion(uint8_t channel, int16_t &code) {
   Wire2.beginTransmission(ADS1015_I2C_ADDR);
   Wire2.write(ADS1015_REG_CONV);
-  uint8_t status = Wire2.endTransmission(false);  // repeated START
+  uint8_t status = Wire2.endTransmission(false);
   if (status != 0) {
     Serial.printf("ADS1015: conv read ch%u (addr phase) failed (I2C status %u)\n",
                   channel, status);
@@ -59,12 +53,9 @@ bool Ads1015::readConversion(uint8_t channel, int16_t &code) {
 }
 
 static float ads1015CodeToCelsius(int16_t code) {
-  if (code < 0) code = 0;  // single-ended shouldn't go negative; clamp
-
-  // Voltage across the NTC from the ADC code.
+  if (code < 0) code = 0;
   float vNtc = ((float)code / (float)ADS1015_FS_CODES) * ADS1015_FS_VOLTS;
 
-  // Guard the divider math against the rails.
   const float vSupply = 3.3f;
   if (vNtc <= 0.0f)        vNtc = 1e-4f;
   if (vNtc >= vSupply)     vNtc = vSupply - 1e-4f;

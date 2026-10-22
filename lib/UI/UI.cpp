@@ -5,20 +5,10 @@
 
 UiController ui;
 
-// --- UI input tuning ---
-static const uint32_t DEBOUNCE_STABLE_MS = 40;     // 2 ticks @ 50Hz
-static const int32_t ENCODER_COUNTS_PER_DETENT = 4; // confirm against the encoder's datasheet on bring-up
+static const uint32_t DEBOUNCE_STABLE_MS = 40;
+static const int32_t ENCODER_COUNTS_PER_DETENT = 4;
 
-static const float MAX_UI_CURRENT_A = 30.3f;  // 6 legs * 5.05A/leg -- matches main.cpp's hardware clamp
-
-// --- encoder quadrature decode (interrupt-driven) ---
-// index = (prevAB << 2) | newAB, AB = (A<<1)|B
-static const int8_t QUADRATURE_TABLE[16] = {
-   0, -1, +1,  0,
-  +1,  0,  0, -1,
-  -1,  0,  0, +1,
-   0, +1, -1,  0
-};
+static const float MAX_UI_CURRENT_A = 30.3f;
 
 static portMUX_TYPE encMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile int32_t encoderAccum = 0;
@@ -30,9 +20,9 @@ static void IRAM_ATTR onEncoderChange() {
   uint8_t a = digitalRead(s_pinEncA);
   uint8_t b = digitalRead(s_pinEncB);
   uint8_t newState = (a << 1) | b;
-  uint8_t idx = (encoderPrevState << 2) | newState;
+  int8_t step = decodeQuadrature(encoderPrevState, newState);
   portENTER_CRITICAL_ISR(&encMux);
-  encoderAccum += QUADRATURE_TABLE[idx];
+  encoderAccum += step;
   portEXIT_CRITICAL_ISR(&encMux);
   encoderPrevState = newState;
 }
@@ -47,23 +37,12 @@ int32_t UiController::readEncoderDelta() {
 }
 
 int32_t UiController::consumeDetents() {
-  encoderCarry += readEncoderDelta();
-  int32_t detents = encoderCarry / ENCODER_COUNTS_PER_DETENT;
-  encoderCarry -= detents * ENCODER_COUNTS_PER_DETENT;
-  return detents;
+  return extractDetents(encoderCarry, readEncoderDelta(), ENCODER_COUNTS_PER_DETENT);
 }
 
-// --- button debounce ---
+//button debounce
 void UiController::updateButton(ButtonState& btn, bool rawLevel, uint32_t now) {
-  btn.pressedEdge = false;
-  if (rawLevel != btn.rawPressed) {
-    btn.rawPressed = rawLevel;
-    btn.lastChangeMs = now;
-  }
-  if ((now - btn.lastChangeMs) >= DEBOUNCE_STABLE_MS && btn.rawPressed != btn.stableLevelPressed) {
-    btn.stableLevelPressed = btn.rawPressed;
-    if (btn.stableLevelPressed) { btn.pressedEdge = true; }
-  }
+  debounceUpdate(btn, rawLevel, now, DEBOUNCE_STABLE_MS);
 }
 
 void UiController::begin(uint8_t pinEncA, uint8_t pinEncB, uint8_t pinEncButton, uint8_t pinBackButton) {
@@ -77,7 +56,7 @@ void UiController::begin(uint8_t pinEncA, uint8_t pinEncB, uint8_t pinEncButton,
   attachInterrupt(digitalPinToInterrupt(s_pinEncB), onEncoderChange, CHANGE);
 }
 
-// --- test-run stats ---
+//test-run stats
 void UiController::resetStats() {
   statMinV = FLT_MAX;  statMaxV = 0.0f;  statSumV = 0.0f;
   statMinI = FLT_MAX;  statMaxI = 0.0f;  statSumI = 0.0f;
@@ -123,7 +102,7 @@ void UiController::finalizeStats(TestResult result) {
   abortRequested = false;
 }
 
-// --- persistence ---
+//persistence
 void UiController::persistSummary(const TestSummary& s) {
   Preferences prefs;
   prefs.begin("loadtests", false);
@@ -152,14 +131,13 @@ uint8_t UiController::loadRecentList(TestSummary out[5]) {
   return count;
 }
 
-// --- global run-edge rule ---
+//global run-edge rule
 void UiController::handleGlobalRunEdge() {
   bool wasRunning = (prevLoadState == LoadState::RUNNING_CC || prevLoadState == LoadState::RUNNING_CV);
   bool isRunning = (loadState == LoadState::RUNNING_CC || loadState == LoadState::RUNNING_CV);
 
   if (isRunning && !wasRunning) {
     resetStats();
-    testTimeElapsed = 0;
     currentScreen = UiScreen::RUN;
     runPage = 0;
   } else if (wasRunning && !isRunning) {
@@ -176,7 +154,6 @@ void UiController::handleGlobalRunEdge() {
   prevLoadState = loadState;
 }
 
-// --- navigation helpers ---
 uint8_t UiController::specMenuRowCount() const {
   return (homeMode == ModeSel::CV) ? 8 : 7;
 }
@@ -285,6 +262,9 @@ void UiController::onConfirm() {
       uint8_t runTestRow = rowCount - 1;
 
       if (specMenuIndex == runTestRow) {
+        if (faultActive || loadState == LoadState::FAULT) { break; }
+        testStartMs = millis();  // set before the state change so the control loop never sees a stale time
+        testTimeElapsed = 0;
         loadState = isCV ? LoadState::RUNNING_CV : LoadState::RUNNING_CC;
       } else if (isCV && specMenuIndex == 0) {
         enterEdit(UiScreen::EDIT_SETPOINT_V, setVoltage);
@@ -293,7 +273,6 @@ void UiController::onConfirm() {
       } else if (!isCV && specMenuIndex == 0) {
         enterEdit(UiScreen::EDIT_SETPOINT_I, setCurrent);
       } else {
-        // remaining rows, same order for CC/CV: Timer, Max Temp, OV, OC, OP
         uint8_t row = specMenuIndex - (isCV ? 2 : 1);
         switch (row) {
           case 0: enterEdit(UiScreen::EDIT_TIMER, setTime); break;
@@ -336,7 +315,7 @@ void UiController::onConfirm() {
       break;
 
     case UiScreen::RUN:
-      break; // reserved
+      break;
 
     case UiScreen::RUN_ABORT_CONFIRM:
       abortRequested = true;
@@ -344,7 +323,7 @@ void UiController::onConfirm() {
       break;
 
     case UiScreen::SUMMARY:
-      break; // reserved
+      break;
 
     case UiScreen::RECENT_LIST:
       if (recentCount > 0) {
@@ -354,14 +333,14 @@ void UiController::onConfirm() {
       break;
 
     case UiScreen::RECENT_DETAIL:
-      break; // reserved
+      break;
   }
 }
 
 void UiController::onBack() {
   switch (currentScreen) {
     case UiScreen::HOME:
-      break; // already top level
+      break;
 
     case UiScreen::SPEC_MENU:
       currentScreen = UiScreen::HOME;
@@ -374,7 +353,7 @@ void UiController::onBack() {
     case UiScreen::EDIT_OV:
     case UiScreen::EDIT_OC:
     case UiScreen::EDIT_OP:
-      currentScreen = UiScreen::SPEC_MENU; // discard editBuffer
+      currentScreen = UiScreen::SPEC_MENU;
       break;
 
     case UiScreen::RUN:
@@ -382,7 +361,7 @@ void UiController::onBack() {
       break;
 
     case UiScreen::RUN_ABORT_CONFIRM:
-      currentScreen = UiScreen::RUN; // cancel the abort
+      currentScreen = UiScreen::RUN;
       break;
 
     case UiScreen::SUMMARY:
@@ -425,6 +404,7 @@ static const char* faultReasonText(FaultReason f) {
     case FaultReason::CURRENT: return "Current";
     case FaultReason::POWER: return "Power";
     case FaultReason::SENSOR_UNRESPONSIVE: return "Sensor";
+    case FaultReason::SELF_TEST: return "Self-test";
     default: return "?";
   }
 }

@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 //  Gain set to 2 (+/-2.048V)
-//  Assumes probes are ALWAYS attached (no open-circuit detection).
+//  Assumes probes are ALWAYS attached.
 
 constexpr uint8_t ADS1015_I2C_ADDR = 0x48;
 constexpr uint8_t ADS1015_REG_CONV   = 0x00;

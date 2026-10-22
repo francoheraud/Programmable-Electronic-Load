@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <SystemState.h>
+#include "UiLogic.h"
 
 enum class UiScreen : uint8_t {
   HOME,
@@ -38,16 +39,14 @@ public:
   void begin(uint8_t pinEncA, uint8_t pinEncB, uint8_t pinEncButton, uint8_t pinBackButton);
   void tick();
   void recordStatsSample();
+  UiScreen screen() const { return currentScreen; }
 
 private:
-  struct ButtonState {
-    bool rawPressed = false;
-    bool stableLevelPressed = false;
-    bool pressedEdge = false;
-    uint32_t lastChangeMs = 0;
-  };
+#ifdef UNIT_TEST
+  friend struct UiTestAccess;
+#endif
 
-  // --- navigation state ---
+  //navigation state
   UiScreen currentScreen = UiScreen::HOME;
   uint8_t homeRow = 0;             // 0=Mode,1=Test Parameters,2=Recent Tests
   ModeSel homeMode = ModeSel::CC;
@@ -58,18 +57,18 @@ private:
   uint8_t recentListIndex = 0;
   float editBuffer = 0.0f;
 
-  // --- encoder ---
+  //encoder
   int32_t encoderCarry = 0;
   int32_t readEncoderDelta();
   int32_t consumeDetents();
 
-  // --- buttons ---
+  //buttons
   ButtonState confirmBtn, backBtn;
   uint8_t _pinEncButton = 0;
   uint8_t _pinBackButton = 0;
   void updateButton(ButtonState& btn, bool rawLevel, uint32_t now);
 
-  // --- test-run stats ---
+  //test-run stats
   float statMinV = 0.0f, statMaxV = 0.0f, statSumV = 0.0f;
   float statMinI = 0.0f, statMaxI = 0.0f, statSumI = 0.0f;
   uint32_t statSampleCount = 0;
@@ -97,7 +96,7 @@ private:
   uint8_t specMenuRowCount() const;
   void enterEdit(UiScreen screen, float currentValue);
 
-  // --- per-screen render ---
+  //per-screen render
   void render();
   void renderHome();
   void renderSpecMenu();

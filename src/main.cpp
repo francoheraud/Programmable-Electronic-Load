@@ -7,53 +7,38 @@
 #include <ADS7128.h>
 #include <DAC.h>
 #include <UI.h>
+#include <SdLog.h>
+#include <Pins.h>
+#include <DeviceConfig.h>
 
-//PINS
-#define PIN_PWM          1
-#define PIN_FAULT_SET    2  //MCU_DISABLE signal
-#define PIN_CS_2         3
-#define PIN_MOSI_2       4
-#define PIN_SCK_2        5
-#define PIN_HARD_DISABLE 6  //hardware signal. Pin altered from schematic
-#define PIN_FAULT_RST    7  //MCU_RESET
-#define PIN_SDA_1        8
-#define PIN_SCL_1        9
-#define PIN_BACK_BUTTON  14 //separate back/cancel/abort button
-#define PIN_SPARE_4      15
-#define PIN_SDA_2        17
-#define PIN_SCL_2        18
-#define PIN_SPARE_5      21
-#define PIN_ENC_A        38 //quadrature phase A
-#define PIN_ENC_B        39 //quadrature phase B
-#define PIN_ENC_BUTTON   40 //encoder's integrated pushbutton (confirm/select)
-//#define PIN_SPARE_1      46
-//#define PIN_SPARE_2      47
-//#define PIN_SPARE_3      48
-
-const uint8_t inaAddrs[6] = {0x40, 0x41, 0x42, 0x43, 0x44, 0x45};
-const uint16_t shuntCal = 3156;  // 25mΩ shunt, 5.05A/leg max
-const uint8_t VBUS_LEG = 0;  // INA leg configured to read VBUS
 static const float heatsinkDifferentialAlert = 0.05f;
 static const float heatsinkTemperatureAlert = 100.0f;
 
-static const uint16_t DAC_FULL_SCALE_CODE = 0xFFFF;
-static const float MAX_CURRENT_PER_LEG_A = 5.05f;              // matches shuntCal above
 static const float MAX_TOTAL_CURRENT_A = MAX_CURRENT_PER_LEG_A * DAC_NUM_SETPOINTS;
-static const float CV_CURRENT_GAIN = 0.5f;                     // A of current demand per V of error
+static const float CV_CURRENT_GAIN = 0.5f; // A of current demand per V of error
 
-//TODO confirm fan below
 #define FAN_PWM_FREQ_HZ   25000
 #define FAN_PWM_RES_BITS  8
+static const float   FAN_BAND_UPPER_C[4] = {25.0f, 30.0f, 45.0f, 70.0f};
+static const uint8_t FAN_BAND_DUTY[5]    = {26, 64, 128, 191, 255}; // -> 10/25/50/75/100% of 8 bit
+static const float   FAN_HYSTERESIS_C    = 2.0f;
+
+// Self-test limits
+static const float SELF_TEST_MAX_IDLE_CURRENT_A = 0.05f;
+static const float SELF_TEST_MAX_BUS_V          = 5.0f;
+static const float SELF_TEST_MIN_TEMP_C         = -10.0f;
+static const float SELF_TEST_MAX_TEMP_C         = 60.0f;
 
 // setpoints
-float overVoltage = 0.0f;
-float overCurrent = 0.0f;
+float overVoltage = 30.0f;
+float overCurrent = MAX_TOTAL_CURRENT_A;
 float overPower = 500.0f;
-float overTemperature = 0.0f;
+float overTemperature = SELF_TEST_MAX_TEMP_C;
 float setCurrent = 0.0f;
 float setVoltage = 0.0f;
 float setTime = 0.0f;
 uint32_t testTimeElapsed = 0;
+uint32_t testStartMs = 0;
 
 // Live measurements
 float measV_Bus = 0.0f;
@@ -63,13 +48,11 @@ float measTemp_Int[6] = {0, 0, 0, 0, 0, 0};
 float measTemp_Ext[4] = {0, 0, 0, 0};
 float measPower = 0.0f;
 
-struct LogRecord {
-  uint32_t timestampMs;
-  float voltage;
-  float current;
-  float tempC[4];
-  LoadState log_loadstate;
-};
+static SPIClass sdSpi(HSPI);
+static bool inaInitOk = false;
+static bool adcInitOk = false;
+static bool oledInitOk = false;
+static bool selfTestFailed = false;
 
 LoadState loadState = LoadState::INIT;
 FaultReason faultReason = FaultReason::NONE;
@@ -80,6 +63,7 @@ static bool tempReadFailed = false;
 static uint32_t inaFailSinceMs = 0;
 static uint32_t tempFailSinceMs = 0;
 
+// Loop control frequencies
 static uint32_t lastControlMs = 0;
 static uint32_t lastProtectionMs = 0;
 static uint32_t lastUiMs = 0;
@@ -90,11 +74,11 @@ static uint32_t lastResolveMs = 0;
 static const uint32_t CONTROL_PERIOD_MS = 20;
 static const uint32_t PROTECTION_PERIOD_MS = 20;
 static const uint32_t UI_PERIOD_MS = 50;
-static const uint32_t LOGGING_PERIOD_MS = 1000;
+static const uint32_t LOGGING_PERIOD_MS = 500;
 static const uint32_t TEMPERATURE_PERIOD_MS = 500;
-static const uint32_t SYSTEM_PERIOD_MS = 1000;
+static const uint32_t SYSTEM_PERIOD_MS = 200;
 static const uint32_t RESOLVE_PERIOD_MS = 50;
-static const uint32_t MAX_STEP_DURATION_MS = 8; // timeout delay
+static const uint32_t MAX_STEP_DURATION_MS = 20; //timeout delay
 
 static inline void checkStepDuration(const char* stepName, uint32_t stepStartMs) {
   uint32_t elapsed = millis() - stepStartMs;
@@ -106,17 +90,15 @@ static inline void checkStepDuration(const char* stepName, uint32_t stepStartMs)
 }
 
 void initialiseSystem() {
-  //TODO: initialise MicroSD
-
-  pinMode(PIN_FAULT_SET, OUTPUT);   // MCU_DISABLE  (active-high)
+  pinMode(PIN_FAULT_SET, OUTPUT);
   digitalWrite(PIN_FAULT_SET, LOW);
-  pinMode(PIN_FAULT_RST, OUTPUT);   // MCU_RESET    (active-high, pulsed)
+  pinMode(PIN_FAULT_RST, OUTPUT);
   digitalWrite(PIN_FAULT_RST, LOW);
  
   ledcSetup(0, FAN_PWM_FREQ_HZ, FAN_PWM_RES_BITS);
   ledcAttachPin(PIN_PWM, 0);
-  ledcWrite(0, 0);
-  
+  ledcWrite(0, FAN_BAND_DUTY[0]);
+
   pinMode(PIN_HARD_DISABLE, INPUT);
   pinMode(PIN_ENC_A,    INPUT_PULLUP);
   pinMode(PIN_ENC_B,    INPUT_PULLUP);
@@ -128,16 +110,23 @@ void initialiseSystem() {
   Wire2.begin(PIN_SDA_2, PIN_SCL_2);
   Wire2.setTimeOut(I2C_TRANSACTION_TIMEOUT_MS);
 
-  if (!ina.begin(inaAddrs, shuntCal, VBUS_LEG)) {
+  inaInitOk = ina.begin(inaAddrs, shuntCal, VBUS_LEG);
+  if (!inaInitOk) {
     Serial.println("initialiseSystem: one or more INAs failed to configure");
   }
 
-  if (!ads7128.begin()) {
+  adcInitOk = ads7128.begin();
+  if (!adcInitOk) {
     Serial.println("initialiseSystem: ADS7128 failed to configure");
   }
 
-  if (!display.begin()) {
+  oledInitOk = display.begin();
+  if (!oledInitOk) {
     Serial.println("initialiseSystem: OLED did not ACK on I2C_2");
+  }
+
+  if (!sdLog.begin(sdSpi, PIN_SCK_1, PIN_MISO_1, PIN_MOSI_1, PIN_CS_1)) {
+    Serial.println("initialiseSystem: no microSD, test data will not be logged");
   }
 
   ui.begin(PIN_ENC_A, PIN_ENC_B, PIN_ENC_BUTTON, PIN_BACK_BUTTON);
@@ -147,11 +136,70 @@ void initialiseSystem() {
   Serial.println("initialised");
 }
 
+static void writeCurrentSetpoint(float totalCurrentA);
+void readSystemData();
+
 void runSelfTest() {
-  // TODO: check values are within range
-  // if all good then loadstate = IDLE else FAULT
-  Serial.println("startup test complete");
-  loadState = LoadState::IDLE;
+  bool ok = true;
+  auto fail = [&](const char* msg) {
+    Serial.printf("SELF-TEST FAIL: %s\n", msg);
+    ok = false;
+  };
+
+  if (digitalRead(PIN_HARD_DISABLE) == HIGH) {
+    digitalWrite(PIN_FAULT_RST, HIGH);
+    delay(10);
+    digitalWrite(PIN_FAULT_RST, LOW);
+    delay(10);
+  }
+  if (digitalRead(PIN_HARD_DISABLE) == HIGH) { fail("hardware disable asserted"); }
+
+  if (!inaInitOk)  { fail("INA configuration"); }
+  if (!adcInitOk)  { fail("ADS7128 configuration"); }
+  if (!oledInitOk) { fail("OLED not responding"); }
+
+  writeCurrentSetpoint(0.0f);
+  delay(CONTROL_PERIOD_MS);
+  readSystemData();
+
+  if (inaReadFailed)  { fail("INA read"); }
+  if (tempReadFailed) { fail("temperature read / heatsink NTC mismatch"); }
+
+  for (uint8_t i = 0; i < 6; i++) {
+    if (fabsf(measCurrent[i]) > SELF_TEST_MAX_IDLE_CURRENT_A) {
+      Serial.printf("  leg %u idle current %.3f A\n", i + 1, measCurrent[i]);
+      fail("idle leg current too high");
+    }
+  }
+  if (measV_Bus > SELF_TEST_MAX_BUS_V) {
+    Serial.printf("  bus voltage %.2f V\n", measV_Bus);
+    fail("bus voltage above low-input limit");
+  }
+  for (uint8_t i = 0; i < 6; i++) {
+    if (measTemp_Int[i] < SELF_TEST_MIN_TEMP_C || measTemp_Int[i] > SELF_TEST_MAX_TEMP_C) {
+      Serial.printf("  heatsink NTC%u %.1f C\n", i + 1, measTemp_Int[i]);
+      fail("heatsink temperature out of range");
+    }
+  }
+  for (uint8_t i = 0; i < 4; i++) {
+    if (measTemp_Ext[i] < SELF_TEST_MIN_TEMP_C || measTemp_Ext[i] > SELF_TEST_MAX_TEMP_C) {
+      Serial.printf("  external sensor %u %.1f C\n", i + 1, measTemp_Ext[i]);
+      fail("external temperature out of range");
+    }
+  }
+
+  if (ok) {
+    Serial.println("startup test passed");
+    loadState = LoadState::IDLE;
+  } else {
+    selfTestFailed = true;
+    faultActive = true;
+    faultReason = FaultReason::SELF_TEST;
+    loadState = LoadState::FAULT;
+    digitalWrite(PIN_FAULT_SET, HIGH);  // MCU_DISABLE
+    display.showMessage("SELF-TEST", "FAILED - see serial");
+    Serial.println("startup test FAILED -- load disabled until reset");
+  }
 }
 
 void readSystemData() {
@@ -249,7 +297,7 @@ void loadControl() {
   float commandCurrent = 0.0f;
 
   if (loadState == LoadState::RUNNING_CC || loadState == LoadState::RUNNING_CV) {
-    testTimeElapsed += CONTROL_PERIOD_MS;
+    testTimeElapsed = millis() - testStartMs;
   }
 
   if (loadState == LoadState::RUNNING_CV) {
@@ -274,8 +322,22 @@ void loadControl() {
 }
 
 void fanControl() {
-  //update tacho based on internal temp readings.
-  //waiting for Kurtis to send datasheet
+  static uint8_t band = 4;
+  if (tempReadFailed || loadState == LoadState::FAULT) {
+    band = 4;
+    ledcWrite(0, FAN_BAND_DUTY[band]);
+    return;
+  }
+  float sum = 0.0f;
+  for (uint8_t i = 0; i < 6; i++) {
+    sum += measTemp_Int[i];
+  }
+  float avgTemp = sum / 6.0f;
+
+  while (band < 4 && avgTemp >= FAN_BAND_UPPER_C[band]) { band++; }
+  while (band > 0 && avgTemp < FAN_BAND_UPPER_C[band - 1] - FAN_HYSTERESIS_C) { band--; }
+
+  ledcWrite(0, FAN_BAND_DUTY[band]);
 }
 
 bool confirmFault() {
@@ -338,6 +400,7 @@ void checkFault() {
 }
 
 void resolveFault() {
+  if (selfTestFailed) { return; }  // self-test faults only clear on reset
   if (!confirmFault()) {
     digitalWrite(PIN_FAULT_SET, LOW);   // release MCU_DISABLE
     digitalWrite(PIN_FAULT_RST, HIGH);  // pulse MCU_RESET
@@ -356,10 +419,37 @@ void resolveFault() {
   }
 }
 
+static bool isRunningState(LoadState s) {
+  return s == LoadState::RUNNING_CC || s == LoadState::RUNNING_CV;
+}
+
 void logData() {
+  static bool wasRunning = false;
+  bool running = isRunningState(loadState);
+
   Serial.printf("[loadState=%d] V=%.2f I=%.2f\n",
                 (int)loadState, measV_Bus, totalCurrent);
-  // TODO: write to a flash log buffer, expose over USB CDC for download.
+
+  // Open/close the CSV on run start/end. Done here (1 s) so SD stalls stay out of the control step.
+  if (running && !wasRunning) {
+    sdLog.startTest();
+  } else if (!running && wasRunning) {
+    sdLog.endTest();
+  }
+  wasRunning = running;
+
+  if (!sdLog.active() || !running) { return; }
+
+  LogRecord rec;
+  rec.timestampMs = testTimeElapsed;
+  rec.state = loadState;
+  rec.voltage = measV_Bus;
+  rec.current = totalCurrent;
+  rec.power = measPower;
+  memcpy(rec.legCurrent, measCurrent, sizeof(rec.legCurrent));
+  memcpy(rec.tempInt, measTemp_Int, sizeof(rec.tempInt));
+  memcpy(rec.tempExt, measTemp_Ext, sizeof(rec.tempExt));
+  sdLog.append(rec);
 }
 
 void setup() {
@@ -368,8 +458,10 @@ void setup() {
   Serial.println("ELEC5552 Electronic Load - startup sequence");
 
   initialiseSystem();
+  delay(100);  // let the INA/ADC finish their first conversions
   readSystemData();
   readTemperatureData();
+  fanControl();
   runSelfTest();
 
   uint32_t now = millis();
