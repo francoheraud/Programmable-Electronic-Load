@@ -19,6 +19,13 @@ static const uint32_t DEFAULT_HOLD_S    = 10;     // setpoints return to 0 after
 static const uint32_t MAX_HOLD_S        = 120;
 static const float    DAC_FS_VOLTS      = 2.5f;   // full-scale set by DAC.cpp (REFDIV_EN + gain 1)
 
+// Trip-threshold scaling from the schematic
+static const float OV_DIV        = 16.0f;    // Prog_OV = Load+ / 16 (R65 15k / R63 1k), DAC OUT7 drives it directly
+static const float OC_DAC_DIV    = 16.0f;    // Prog_OC = DAC OUT6 / 16 (R50 15k / R52 1k)
+static const float SHUNT_OHMS    = 0.025f;   // per-leg shunt; comparator sees the average of the 6 shunt voltages
+static const float SYSTEM_OV_V   = 33.3f;    // fixed hardware limit (U12A)
+static const float SYSTEM_OC_A   = 33.5f;    // fixed hardware limit, total current (U11B, 0.1395 V on the shunt average)
+
 static const uint8_t INA_REG_MFR_ID = 0x3E;       // reads 0x5449 ("TI") on TI parts
 
 static SPIClass sdSpi(HSPI);
@@ -327,15 +334,41 @@ static void cmdDac(int argc, String argv[]) {
   bool isSet = argc >= 4 && argv[1] == "set";
   bool isCode = argc >= 4 && argv[1] == "code";
   bool isOvOc = argc >= 3 && (argv[1] == "ov" || argv[1] == "oc");
-  if (!(isSet || isCode || isOvOc)) {
+  bool isOvV = argc >= 3 && argv[1] == "ovv";
+  bool isOcA = argc >= 3 && argv[1] == "oca";
+  if (!(isSet || isCode || isOvOc || isOvV || isOcA)) {
     Serial.println("usage: dac zero\n"
                    "       dac set <leg 1-6|all> <amps> [seconds]    (needs 'arm'; amps <= 1.0 per leg)\n"
                    "       dac code <leg 1-6|all> <code hex> [secs]  (needs 'arm'; same cap)\n"
-                   "       dac ov <code hex> | dac oc <code hex>     (needs 'arm'; trip-threshold registers)");
+                   "       dac ov <code hex> | dac oc <code hex>     (needs 'arm'; raw trip-threshold codes)\n"
+                   "       dac ovv <load volts>                      (needs 'arm'; OV trip, max 40 V)\n"
+                   "       dac oca <total amps>                      (needs 'arm'; OC trip, max 37.5 A)");
     return;
   }
   if (!armed) { Serial.println("refused: type 'arm' first (this drives the load stage)"); return; }
   ensureDac();
+
+  if (isOvV || isOcA) {
+    float x;
+    if (!parseNum(argv[2], x) || x < 0) { Serial.println("value must be a number >= 0"); return; }
+    float pinV;  // voltage on the comparator reference, then DAC output voltage
+    if (isOvV) {
+      pinV = x / OV_DIV;
+      if (pinV > DAC_FS_VOLTS) { Serial.printf("refused: above DAC range (max %.1f V)\n", DAC_FS_VOLTS * OV_DIV); return; }
+      if (x > SYSTEM_OV_V) Serial.printf("note: above the fixed %.1f V system OV, which trips first\n", SYSTEM_OV_V);
+    } else {
+      pinV = (x / 6.0f) * SHUNT_OHMS;
+      float dacV = pinV * OC_DAC_DIV;
+      if (dacV > DAC_FS_VOLTS) { Serial.printf("refused: above DAC range (max %.1f A)\n", DAC_FS_VOLTS / OC_DAC_DIV / SHUNT_OHMS * 6.0f); return; }
+      pinV = dacV;
+      if (x > SYSTEM_OC_A) Serial.printf("note: above the fixed %.1f A system OC, which trips first\n", SYSTEM_OC_A);
+    }
+    uint16_t code = (uint16_t)lroundf(pinV / DAC_FS_VOLTS * DAC_FULL_SCALE_CODE);
+    if (isOvV) dac.writeOV(code); else dac.writeOC(code);
+    Serial.printf("%s threshold %.3f %s -> code 0x%04X (DAC output %.4f V)\n",
+                  isOvV ? "OV" : "OC", x, isOvV ? "V" : "A (total)", code, (float)code / 65535.0f * DAC_FS_VOLTS);
+    return;
+  }
 
   if (isOvOc) {
     uint32_t code;
@@ -497,7 +530,7 @@ void devicesPrintHelp() {
     "  sense                     one reading of everything (INA + NTC + probes)\n"
     "  watch                     'sense' every second until 'stop'\n"
     "  arm / disarm              allow / forbid DAC output writes\n"
-    "  dac zero | dac set <leg|all> <amps> [s] | dac code <leg|all> <hex> [s] | dac ov|oc <hex>\n"
+    "  dac zero | dac set <leg|all> <amps> [s] | dac code <leg|all> <hex> [s] | dac ov|oc <hex> | dac ovv <volts> | dac oca <amps>\n"
     "  fan <0-100>               fan PWM duty\n"
     "  fault | faultset <0|1> | faultrst   read HARD_DISABLE, drive MCU_DISABLE, pulse MCU_RESET\n"
     "  sd [init] | sd test | sd log | sd ls   SD card mount, raw read/write, real logger, listing\n"

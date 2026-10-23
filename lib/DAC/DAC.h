@@ -3,8 +3,8 @@
 #include <SPI.h>
 
 #define DAC_REG_SETPOINT_BASE  0x08 // SetpointN = base + (N-1)
-#define DAC_REG_PROG_OV        0x0E
-#define DAC_REG_PROG_OC        0x0F
+#define DAC_REG_PROG_OC        0x0E // OUT6 -> /16 divider -> Prog_OC
+#define DAC_REG_PROG_OV        0x0F // OUT7 -> Prog_OV (direct)
 #define DAC_REG_CONFIG         0x03
 #define DAC_REG_GAIN           0x04
 #define DAC_NUM_SETPOINTS      6
