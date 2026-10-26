@@ -275,7 +275,7 @@ static void handleCommand(String line) {
   else if (cmd == "btn")      { startMode(Mode::BTN); }
   else if (cmd == "ui")       { startMode(Mode::UI); }
   else if (cmd == "watch")    { startMode(Mode::WATCH); }
-  else if (cmd == "stop")     { stopMode(); devicesSafeState(); Serial.println("DAC setpoints = 0, disarmed"); }
+  else if (cmd == "stop")     { stopMode(); devicesSafeState(); Serial.println("Stopped"); }
   else if (cmd == "reboot")   { devicesSafeState(); Serial.println("rebooting"); delay(100); ESP.restart(); }
   else {
     stopMode();

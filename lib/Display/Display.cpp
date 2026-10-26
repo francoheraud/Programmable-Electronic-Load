@@ -9,13 +9,17 @@ static Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire2, -1);
 Display display;
 
 bool Display::begin() {
-  _ready = oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR);
+  Wire2.beginTransmission(OLED_I2C_ADDR);
+  const bool acknowledged = Wire2.endTransmission() == 0;
+  // Wire2 was configured by setup(); retain its PCB pins.
+  _ready = acknowledged && oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR, true, false);
   if (!_ready) {
     Serial.println("Display: SSD1306 did not ACK on I2C_2 -- check "
                     "OLED_I2C_ADDR, wiring, and the module's BS1/BS0 strap.");
     return false;
   }
 
+  oled.setRotation(2); // Enclosure mounts the PCB upside down: rotate all screens 180 degrees.
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
   oled.setTextSize(1);

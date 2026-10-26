@@ -15,46 +15,64 @@ bool Ads7128::writeReg(uint8_t reg, uint8_t value) {
   return true;
 }
 
-bool Ads7128::begin() {
-  bool ok = true;
-  ok &= writeReg(ADS7128_REG_PIN_CFG, 0x00);
-  ok &= writeReg(ADS7128_REG_OSR_CFG, ADS7128_OSR_128);
+// TI ADS7128 sections 8.3.6 and 8.3.14: manual averaged conversions
+// populate RECENT registers only with statistics enabled.
+constexpr uint8_t REG_STATUS = 0x00;
+constexpr uint8_t REG_OPMODE = 0x04;
+constexpr uint8_t REG_SEQUENCE = 0x10;
+constexpr uint8_t STATS_EN = 0x20;
+constexpr uint8_t CNVST = 0x08;
+constexpr uint8_t OSR_DONE = 0x08;
+constexpr uint32_t CONVERSION_TIMEOUT_MS = 10;
 
-  if (!ok) {
-    Serial.println("Ads7128::begin: configuration failed -- check wiring/address 0x10");
+bool Ads7128::readRegs(uint8_t reg, uint8_t *data, uint8_t count) {
+  Wire1.beginTransmission(ADS7128_I2C_ADDR);
+  // Block read increments the address; single read repeats the same register.
+  Wire1.write(count > 1 ? uint8_t(0x30) : ADS7128_OP_SINGLE_READ);
+  Wire1.write(reg);
+  if (Wire1.endTransmission(false) != 0) return false;
+  if (Wire1.requestFrom(ADS7128_I2C_ADDR, count) != count) {
+    while (Wire1.available()) Wire1.read();
+    return false;
   }
-  return ok;
+  for (uint8_t i = 0; i < count; ++i) data[i] = Wire1.read();
+  return true;
+}
+
+bool Ads7128::begin() {
+  return writeReg(ADS7128_REG_GENERAL_CFG, 0x00) &&
+         writeReg(REG_SEQUENCE, 0x00) &&
+         writeReg(REG_OPMODE, 0x00) &&
+         writeReg(ADS7128_REG_PIN_CFG, 0x00) &&
+         writeReg(ADS7128_REG_OSR_CFG, ADS7128_OSR_128);
 }
 
 bool Ads7128::readChannel(uint8_t channel, uint16_t &rawCode) {
-  if (channel > 7) {
-    Serial.printf("ADS7128: channel %u out of range (0-7)\n", channel);
-    return false;
-  }
-  if (!writeReg(ADS7128_REG_CHANNEL_SEL, channel)) {
-    return false;
-  }
-  uint8_t lsbReg = ADS7128_REG_RECENT_CH0_LSB + (channel * 2);
+  if (channel > 7) return false;
+  if (!writeReg(ADS7128_REG_GENERAL_CFG, 0x00) ||
+      !writeReg(ADS7128_REG_CHANNEL_SEL, channel) ||
+      !writeReg(REG_STATUS, OSR_DONE) || // W1C: discard any old completion.
+      !writeReg(ADS7128_REG_GENERAL_CFG, STATS_EN) ||
+      !writeReg(ADS7128_REG_GENERAL_CFG, STATS_EN | CNVST)) return false;
 
-  Wire1.beginTransmission(ADS7128_I2C_ADDR);
-  Wire1.write(ADS7128_OP_SINGLE_READ);
-  Wire1.write(lsbReg);
-  uint8_t status = Wire1.endTransmission(false);
-  if (status != 0) {
-    Serial.printf("ADS7128: ch%u read (address phase) failed (I2C status %u)\n",
-                  channel, status);
+  const uint32_t start = millis();
+  bool ready = false;
+  do {
+    uint8_t status;
+    if (!readRegs(REG_STATUS, &status, 1)) break;
+    if (status & OSR_DONE) { ready = true; break; }
+    delay(1); // Yield while the ADC performs its 128-sample average.
+  } while (uint32_t(millis() - start) < CONVERSION_TIMEOUT_MS);
+
+  // Freeze statistics before reading the adjacent LSB/MSB registers.
+  if (!writeReg(ADS7128_REG_GENERAL_CFG, 0x00)) return false;
+  if (!ready) {
+    Serial.printf("ADS7128: ch%u conversion failed or timed out\n", channel);
     return false;
   }
-
-  uint8_t got = Wire1.requestFrom(ADS7128_I2C_ADDR, (uint8_t)2);
-  if (got != 2) {
-    Serial.printf("ADS7128: ch%u read got %u/2 bytes -- not responding\n", channel, got);
-    return false;
-  }
-
-  uint8_t lsb = Wire1.read();
-  uint8_t msb = Wire1.read();
-  rawCode = ((uint16_t)msb << 8) | lsb;
+  uint8_t data[2];
+  if (!readRegs(ADS7128_REG_RECENT_CH0_LSB + 2 * channel, data, 2)) return false;
+  rawCode = (uint16_t(data[1]) << 8) | data[0];
   return true;
 }
 
@@ -62,28 +80,30 @@ static const float NTC_FIXED_R_OHMS = 10000.0f;
 static const float NTC_R0_OHMS      = 10000.0f;
 static const float NTC_T0_KELVIN    = 298.15f; 
 static const float NTC_BETA         = 3950.0f;
-static const float ADC_FULL_SCALE   = 65535.0f;
+static const float ADC_FULL_SCALE   = 65536.0f;
 
-static float ntcCodeToCelsius(uint16_t raw) {
+static bool ntcCodeToCelsius(uint16_t raw, float &temperature) {
+  if (raw == 0 || raw == 0xFFFF) return false;
   float ratio = (float)raw / ADC_FULL_SCALE;
-  if (ratio <= 0.0f)  ratio = 1e-6f;
-  if (ratio >= 1.0f)  ratio = 1.0f - 1e-6f;
   float rNtc = NTC_FIXED_R_OHMS * ratio / (1.0f - ratio);
 
   float invT = (1.0f / NTC_T0_KELVIN) + (1.0f / NTC_BETA) * logf(rNtc / NTC_R0_OHMS);
-  float tKelvin = 1.0f / invT;
-  return tKelvin - 273.15f;
+  if (!isfinite(invT) || invT <= 0.0f) return false;
+  temperature = 1.0f / invT - 273.15f;
+  return isfinite(temperature);
 }
 
 bool Ads7128::readTemperatures(float tempsC[6]) {
-  bool allOk = true;
+  float readings[6];
   for (uint8_t ch = 0; ch < 6; ch++) {
     uint16_t raw;
-    if (readChannel(ch, raw)) {
-      tempsC[ch] = ntcCodeToCelsius(raw);
-    } else {
-      allOk = false;
+    if (!readChannel(ch, raw)) return false;
+    if (!ntcCodeToCelsius(raw, readings[ch])) {
+      Serial.printf("ADS7128: ch%u invalid NTC code %u\n", ch, raw);
+      return false;
     }
   }
-  return allOk;
+  // Publish only a complete valid scan. Callers retain the existing fault path.
+  for (uint8_t ch = 0; ch < 6; ch++) tempsC[ch] = readings[ch];
+  return true;
 }

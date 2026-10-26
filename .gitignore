@@ -3,3 +3,11 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Local build products and commissioning backups
+backups/
+backup-before-*/
+*.bak
+*.exe
+*.o
+__pycache__/

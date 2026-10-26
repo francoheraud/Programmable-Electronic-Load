@@ -18,6 +18,7 @@ public:
   bool readTemperatures(float tempsC[6]);
 private:
   bool writeReg(uint8_t reg, uint8_t value);
+  bool readRegs(uint8_t reg, uint8_t *data, uint8_t count);
 };
 
 extern Ads7128 ads7128;

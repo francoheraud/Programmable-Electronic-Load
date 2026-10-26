@@ -56,6 +56,8 @@ private:
   uint8_t summaryScroll = 0;
   uint8_t recentListIndex = 0;
   float editBuffer = 0.0f;
+  uint8_t currentStepIndex = 0;    // 0=10 mA, 1=100 mA, 2=1 A
+  bool timerHours = false;        // editing increment; duration remains stored in seconds
 
   //encoder
   int32_t encoderCarry = 0;

@@ -1,15 +1,8 @@
 #include "ADS1015.h"
 #include <Display.h>
+#include <ExternalNtc.h>
 
 Ads1015 ads1015;
-
-static const float NTC_FIXED_R_OHMS = 10000.0f;
-static const float NTC_R0_OHMS      = 10000.0f;
-static const float NTC_T0_KELVIN    = 298.15f; 
-static const float NTC_BETA         = 3950.0f; 
-
-static const float ADS1015_FS_VOLTS = 2.048f;
-static const int   ADS1015_FS_CODES = 2047;
 
 static const uint16_t kChannelConfig[4] = {
   ADS1015_CFG_AIN0, ADS1015_CFG_AIN1, ADS1015_CFG_AIN2, ADS1015_CFG_AIN3
@@ -52,21 +45,11 @@ bool Ads1015::readConversion(uint8_t channel, int16_t &code) {
   return true;
 }
 
-static float ads1015CodeToCelsius(int16_t code) {
-  if (code < 0) code = 0;
-  float vNtc = ((float)code / (float)ADS1015_FS_CODES) * ADS1015_FS_VOLTS;
-
-  const float vSupply = 3.3f;
-  if (vNtc <= 0.0f)        vNtc = 1e-4f;
-  if (vNtc >= vSupply)     vNtc = vSupply - 1e-4f;
-
-  float rNtc = NTC_FIXED_R_OHMS * vNtc / (vSupply - vNtc);
-  float invT = (1.0f / NTC_T0_KELVIN) + (1.0f / NTC_BETA) * logf(rNtc / NTC_R0_OHMS);
-  return (1.0f / invT) - 273.15f;
-}
-
 bool Ads1015::readTemperatures(float tempsC[4]) {
   bool allOk = true;
+  // Missing/invalid probes are optional. NaN explicitly marks unavailable
+  // samples; valid channels still update even when another probe is absent.
+  float fresh[4] = {NAN, NAN, NAN, NAN};
   for (uint8_t ch = 0; ch < 4; ch++) {
     if (!startConversion(ch)) {
       allOk = false;
@@ -77,10 +60,11 @@ bool Ads1015::readTemperatures(float tempsC[4]) {
 
     int16_t code;
     if (readConversion(ch, code)) {
-      tempsC[ch] = ads1015CodeToCelsius(code);
+      externalNtcCelsius(code, fresh[ch]);
     } else {
       allOk = false;
     }
   }
+  for (uint8_t ch = 0; ch < 4; ++ch) tempsC[ch] = fresh[ch];
   return allOk;
 }

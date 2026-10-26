@@ -4,6 +4,7 @@
 #include <UI.h>
 #include <Display.h>
 #include <Preferences.h>
+#include <LoadSetpoints.h>
 
 // ---- globals normally defined in main.cpp ----
 float overVoltage = 30.0f, overCurrent = 30.3f, overPower = 500.0f, overTemperature = 60.0f;
@@ -217,17 +218,17 @@ void test_home_to_recent_list_empty() {
 
 void test_spec_menu_row_count() {
   UiTestAccess::homeMode() = ModeSel::CC;
-  TEST_ASSERT_EQUAL_INT(7, UiTestAccess::specMenuRowCount());
+  TEST_ASSERT_EQUAL_INT(9, UiTestAccess::specMenuRowCount());
   UiTestAccess::homeMode() = ModeSel::CV;
-  TEST_ASSERT_EQUAL_INT(8, UiTestAccess::specMenuRowCount());
+  TEST_ASSERT_EQUAL_INT(10, UiTestAccess::specMenuRowCount());
 }
 
 void test_spec_menu_rotate_clamps_and_scrolls() {
   UiTestAccess::homeMode() = ModeSel::CV;
   UiTestAccess::screen() = UiScreen::SPEC_MENU;
   spin(100);
-  TEST_ASSERT_EQUAL_INT(7, UiTestAccess::specMenuIndex());
-  TEST_ASSERT_EQUAL_INT(1, UiTestAccess::specMenuScroll());  // index - 6
+  TEST_ASSERT_EQUAL_INT(9, UiTestAccess::specMenuIndex());
+  TEST_ASSERT_EQUAL_INT(3, UiTestAccess::specMenuScroll());  // index - 6
   spin(-100);
   TEST_ASSERT_EQUAL_INT(0, UiTestAccess::specMenuIndex());
   TEST_ASSERT_EQUAL_INT(0, UiTestAccess::specMenuScroll());
@@ -236,13 +237,13 @@ void test_spec_menu_rotate_clamps_and_scrolls() {
 struct EditCase { UiScreen screen; float step; float max; float* target; };
 
 static EditCase editCases[] = {
-  {UiScreen::EDIT_SETPOINT_V, 0.1f,  150.0f,        &setVoltage},
-  {UiScreen::EDIT_SETPOINT_I, 0.05f, MAX_UI_CURRENT_A, &setCurrent},
-  {UiScreen::EDIT_TIMER,      5.0f,  99999.0f,      &setTime},
+  {UiScreen::EDIT_SETPOINT_V, 0.1f,  30.0f,        &setVoltage},
+  {UiScreen::EDIT_SETPOINT_I, 0.01f, 30.0f, &setCurrent},
+  {UiScreen::EDIT_TIMER,      5.0f,  86400.0f,      &setTime},
   {UiScreen::EDIT_MAXTEMP,    1.0f,  150.0f,        &overTemperature},
-  {UiScreen::EDIT_OV,         0.5f,  150.0f,        &overVoltage},
+  {UiScreen::EDIT_OV,         0.5f,  30.0f,        &overVoltage},
   {UiScreen::EDIT_OC,         0.1f,  MAX_UI_CURRENT_A, &overCurrent},
-  {UiScreen::EDIT_OP,         5.0f,  2000.0f,       &overPower},
+  {UiScreen::EDIT_OP,         5.0f,  500.0f,       &overPower},
 };
 
 void test_edit_screens_step_clamp_save() {
@@ -561,8 +562,110 @@ void test_tick_renders_every_call() {
   TEST_ASSERT_EQUAL_INT(before + 2, display.frames);
 }
 
+void test_resolution_full_range_without_drift() {
+  UiTestAccess::enterEdit(UiScreen::EDIT_SETPOINT_I, 0);
+  for (int i = 1; i <= 3000; ++i) {
+    UiTestAccess::rotate(1);
+    NEAR(i * 0.01f, UiTestAccess::editBuffer());
+  }
+  for (int i = 2999; i >= 0; --i) {
+    UiTestAccess::rotate(-1);
+    NEAR(i * 0.01f, UiTestAccess::editBuffer());
+  }
+  UiTestAccess::enterEdit(UiScreen::EDIT_SETPOINT_V, 0);
+  for (int i = 1; i <= 300; ++i) {
+    UiTestAccess::rotate(1);
+    NEAR(i * 0.1f, UiTestAccess::editBuffer());
+  }
+}
+
+void test_fine_current_save_and_screen_fit() {
+  UiTestAccess::enterEdit(UiScreen::EDIT_SETPOINT_I, 0.05f);
+  UiTestAccess::rotate(1);
+  ui.tick();
+  TEST_ASSERT_EQUAL_STRING("Step: 0.01 A (10 mA)", display.rows[3].c_str());
+  for (const auto& row : display.rows) TEST_ASSERT_TRUE(row.size() <= 21);
+  UiTestAccess::confirm();
+  NEAR(0.06f, setCurrent);
+  UiTestAccess::enterEdit(UiScreen::EDIT_SETPOINT_I, setCurrent);
+  UiTestAccess::rotate(1);
+  UiTestAccess::back();
+  NEAR(0.06f, setCurrent);
+}
+
+void test_entry_clamps_old_out_of_range_values() {
+  UiTestAccess::enterEdit(UiScreen::EDIT_SETPOINT_V, 150);
+  UiTestAccess::confirm();
+  NEAR(30, setVoltage);
+  UiTestAccess::enterEdit(UiScreen::EDIT_SETPOINT_I, 30.3f);
+  UiTestAccess::confirm();
+  NEAR(30, setCurrent);
+}
+
+void test_current_step_toggle_preserves_value() {
+  setCurrent = 0.06f;
+  for (int step = 1; step <= 3; ++step) {
+    UiTestAccess::screen() = UiScreen::SPEC_MENU;
+    UiTestAccess::specMenuIndex() = UiTestAccess::specMenuRowCount() - 2;
+    UiTestAccess::confirm();
+    EXPECT_STATE(LoadState::IDLE);
+    NEAR(0.06f, setCurrent);
+    UiTestAccess::enterEdit(UiScreen::EDIT_SETPOINT_I, setCurrent);
+    UiTestAccess::rotate(1);
+    NEAR(step == 1 ? 0.16f : (step == 2 ? 1.06f : 0.07f), UiTestAccess::editBuffer());
+    UiTestAccess::back();
+  }
+}
+void test_power_ceiling_and_invalid_inputs() {
+  NEAR(500, LoadSetpoints::powerLimit(900));
+  NEAR(0, LoadSetpoints::powerLimit(NAN));
+  NEAR(500.0f/30, LoadSetpoints::currentCeiling(30,900,true));
+  NEAR(30, LoadSetpoints::currentCeiling(5,500,true));
+  NEAR(10, LoadSetpoints::currentCeiling(30,300,true));
+  NEAR(0, LoadSetpoints::currentCeiling(30,500,false));
+  NEAR(0, LoadSetpoints::currentCeiling(NAN,500,true));
+  NEAR(0, LoadSetpoints::currentCeiling(-1,500,true));
+  NEAR(0, LoadSetpoints::currentCeiling(0,0,true));
+  for (int v=1; v<=300; ++v) {
+    float voltage=v/10.0f;
+    TEST_ASSERT_TRUE(LoadSetpoints::currentCeiling(voltage,500,true)*voltage <= 500.0001f);
+  }
+}
+void test_timer_hours_seconds_preserve_duration() {
+  setTime=10;
+  UiTestAccess::screen()=UiScreen::SPEC_MENU;
+  UiTestAccess::specMenuIndex()=UiTestAccess::specMenuRowCount()-3;
+  UiTestAccess::confirm();
+  NEAR(10,setTime);
+  UiTestAccess::enterEdit(UiScreen::EDIT_TIMER,setTime);
+  UiTestAccess::rotate(1);
+  NEAR(3610,UiTestAccess::editBuffer());
+  ui.tick();
+  TEST_ASSERT_EQUAL_STRING("01:00:10",display.rows[2].c_str());
+  for(const auto& row:display.rows) TEST_ASSERT_TRUE(row.size()<=21);
+  UiTestAccess::confirm();
+  NEAR(3610,setTime);
+  UiTestAccess::specMenuIndex()=UiTestAccess::specMenuRowCount()-3;
+  UiTestAccess::confirm();
+  UiTestAccess::enterEdit(UiScreen::EDIT_TIMER,setTime);
+  UiTestAccess::rotate(1);
+  NEAR(3615,UiTestAccess::editBuffer());
+  UiTestAccess::back(); NEAR(3610,setTime);
+  UiTestAccess::specMenuIndex()=UiTestAccess::specMenuRowCount()-3;
+  UiTestAccess::confirm();
+  UiTestAccess::enterEdit(UiScreen::EDIT_TIMER,0);
+  UiTestAccess::rotate(24); NEAR(86400,UiTestAccess::editBuffer());
+  UiTestAccess::rotate(1); NEAR(86400,UiTestAccess::editBuffer());
+  UiTestAccess::rotate(-100); NEAR(0,UiTestAccess::editBuffer());
+}
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_timer_hours_seconds_preserve_duration);
+  RUN_TEST(test_current_step_toggle_preserves_value);
+  RUN_TEST(test_power_ceiling_and_invalid_inputs);
+  RUN_TEST(test_resolution_full_range_without_drift);
+  RUN_TEST(test_fine_current_save_and_screen_fit);
+  RUN_TEST(test_entry_clamps_old_out_of_range_values);
   RUN_TEST(test_quadrature_directions);
   RUN_TEST(test_quadrature_full_table_properties);
   RUN_TEST(test_detents_carry_remainder);

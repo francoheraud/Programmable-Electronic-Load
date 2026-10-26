@@ -1,0 +1,51 @@
+CV AND ASYNCHRONOUS SD UPDATE — 25 October 2026
+
+Installed project:
+C:\Users\Franc\OneDrive\Documents\PlatformIO\Projects\design-project
+
+Changes:
+- CV uses subtraction with error = target voltage - measured voltage.
+- Pins, fan control, UI and DAC current scaling unchanged.
+- Full application records CSV snapshots at 2 Hz.
+- Runtime SD/file operations execute in a separate task on the other CPU core.
+- Startup mounts the card synchronously before the control loop starts.
+- Fixed 64-record RAM queue (~32 seconds at 2 Hz). Sends do not wait.
+- Overflow drops the newest sample, increments a counter and preserves run order.
+- Run-end requests cannot be lost to a full sample queue.
+- Separate files per run; periodic flush every 2 seconds and close on run end.
+- Short-write/open failures disable logging until reboot; load operation continues.
+- CSV adds sample_no and dropped_total (cumulative since boot).
+- Background serial messages identify files, failures and final drop/error counts.
+- SD diagnostic commands refuse direct filesystem access while the writer is busy.
+
+Use a FAT32-formatted 16 GB microSD card, inserted before power-up. Stop the test
+and wait for 'SdLog: run closed' before powering down/removing the card. Power
+loss can lose buffered/queued data; flushing is not a power-loss guarantee.
+If the card stalls permanently, closure may never complete. Never remove it
+while powered just because a fixed waiting period has elapsed.
+
+The queue removes SD latency from the main loop; it is not a guarantee of hard
+real-time operation. Physical card timing, control stability and power hardware
+have not been tested. The CV gain/sample-rate and DAC scaling are unchanged.
+
+Build/upload from PowerShell in the project folder:
+.\pio.ps1 run -e load_n16r8
+.\pio.ps1 device list
+.\pio.ps1 run -e load_n16r8 -t upload --upload-port COM3
+.\pio.ps1 device monitor -e load_n16r8 -p COM3
+
+Confirm the port before uploading. Use load_n16r8_usb instead for native USB.
+The default ui_n16r8 environment remains the existing UI-only simulation and
+DOES NOT run the real load or record SD data. Nothing was flashed automatically.
+
+Validation:
+- load_n16r8 and load_n16r8_usb both compile and link successfully.
+- Real SdLog.cpp tested with deterministic host mocks: nonblocking enqueue,
+  full-queue stop, run separation, periodic flush, short-write failure, open
+  failure and missing card.
+- Tests do not model real dual-core scheduling or physical SD timing.
+
+On hardware, first confirm the card-mounted message; perform a short low-power
+run, stop, wait for the close message, then inspect test_NNNN.csv on a computer.
+Check timestamps, measurements, sample numbers and dropped counts. Compare
+control behaviour with logging enabled and with no card before increasing power.

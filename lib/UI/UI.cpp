@@ -2,6 +2,7 @@
 #include <Display.h>
 #include <Preferences.h>
 #include <float.h>
+#include <LoadSetpoints.h>
 
 UiController ui;
 
@@ -78,7 +79,9 @@ void UiController::recordStatsSample() {
   statSampleCount++;
 
   for (uint8_t i = 0; i < 6; i++) { statMaxIntTemp = max(statMaxIntTemp, measTemp_Int[i]); }
-  for (uint8_t i = 0; i < 4; i++) { statMaxExtTemp = max(statMaxExtTemp, measTemp_Ext[i]); }
+  for (uint8_t i = 0; i < 4; i++) {
+    if (isfinite(measTemp_Ext[i])) statMaxExtTemp = max(statMaxExtTemp, measTemp_Ext[i]);
+  }
 }
 
 void UiController::finalizeStats(TestResult result) {
@@ -91,7 +94,7 @@ void UiController::finalizeStats(TestResult result) {
   lastSummary.maxCurrent = statMaxI;
   lastSummary.avgCurrent = statSampleCount ? statSumI / statSampleCount : 0.0f;
   lastSummary.maxIntTemp = (statMaxIntTemp == -FLT_MAX) ? 0.0f : statMaxIntTemp;
-  lastSummary.maxExtTemp = (statMaxExtTemp == -FLT_MAX) ? 0.0f : statMaxExtTemp;
+  lastSummary.maxExtTemp = (statMaxExtTemp == -FLT_MAX) ? NAN : statMaxExtTemp;
   lastSummary.durationMs = millis() - runStartMs;
   lastSummary.result = result;
   lastSummary.fault = (result == TestResult::FAULT) ? faultReason : FaultReason::NONE;
@@ -155,11 +158,21 @@ void UiController::handleGlobalRunEdge() {
 }
 
 uint8_t UiController::specMenuRowCount() const {
-  return (homeMode == ModeSel::CV) ? 8 : 7;
+  return (homeMode == ModeSel::CV) ? 10 : 9;
 }
 
 void UiController::enterEdit(UiScreen screen, float currentValue) {
   editBuffer = currentValue;
+  if (screen == UiScreen::EDIT_TIMER)
+    editBuffer = isfinite(currentValue) ? constrain(currentValue, 0.0f, 86400.0f) : 0;
+  if (screen == UiScreen::EDIT_SETPOINT_I)
+    editBuffer = LoadSetpoints::advance(currentValue, 0, LoadSetpoints::CURRENT_STEP_A, LoadSetpoints::MAX_CURRENT_A);
+  if (screen == UiScreen::EDIT_SETPOINT_V)
+    editBuffer = LoadSetpoints::advance(currentValue, 0, LoadSetpoints::VOLTAGE_STEP_V, LoadSetpoints::MAX_VOLTAGE_V);
+  if (screen == UiScreen::EDIT_OV)
+    editBuffer = constrain(currentValue, 0.0f, LoadSetpoints::MAX_VOLTAGE_V);
+  if (screen == UiScreen::EDIT_OP)
+    editBuffer = constrain(currentValue, 0.0f, LoadSetpoints::MAX_POWER_W);
   currentScreen = screen;
 }
 
@@ -185,16 +198,14 @@ void UiController::onRotate(int32_t detents) {
       break;
     }
     case UiScreen::EDIT_SETPOINT_V:
-      editBuffer += 0.1f * detents;
-      editBuffer = constrain(editBuffer, 0.0f, 150.0f);
+      editBuffer = LoadSetpoints::advance(editBuffer, detents, LoadSetpoints::VOLTAGE_STEP_V, LoadSetpoints::MAX_VOLTAGE_V);
       break;
     case UiScreen::EDIT_SETPOINT_I:
-      editBuffer += 0.05f * detents;
-      editBuffer = constrain(editBuffer, 0.0f, MAX_UI_CURRENT_A);
+      editBuffer = LoadSetpoints::advanceCurrent(editBuffer, detents, currentStepIndex);
       break;
     case UiScreen::EDIT_TIMER:
-      editBuffer += 5.0f * detents;
-      editBuffer = constrain(editBuffer, 0.0f, 99999.0f);
+      editBuffer += (timerHours ? 3600.0f : 5.0f) * detents;
+      editBuffer = constrain(editBuffer, 0.0f, 86400.0f);
       break;
     case UiScreen::EDIT_MAXTEMP:
       editBuffer += 1.0f * detents;
@@ -202,7 +213,7 @@ void UiController::onRotate(int32_t detents) {
       break;
     case UiScreen::EDIT_OV:
       editBuffer += 0.5f * detents;
-      editBuffer = constrain(editBuffer, 0.0f, 150.0f);
+      editBuffer = constrain(editBuffer, 0.0f, LoadSetpoints::MAX_VOLTAGE_V);
       break;
     case UiScreen::EDIT_OC:
       editBuffer += 0.1f * detents;
@@ -210,7 +221,7 @@ void UiController::onRotate(int32_t detents) {
       break;
     case UiScreen::EDIT_OP:
       editBuffer += 5.0f * detents;
-      editBuffer = constrain(editBuffer, 0.0f, 2000.0f);
+      editBuffer = constrain(editBuffer, 0.0f, LoadSetpoints::MAX_POWER_W);
       break;
     case UiScreen::RUN: {
       int8_t next = (int8_t)runPage + (detents > 0 ? 1 : -1);
@@ -266,6 +277,10 @@ void UiController::onConfirm() {
         testStartMs = millis();  // set before the state change so the control loop never sees a stale time
         testTimeElapsed = 0;
         loadState = isCV ? LoadState::RUNNING_CV : LoadState::RUNNING_CC;
+      } else if (specMenuIndex == runTestRow - 1) {
+        currentStepIndex = (currentStepIndex + 1) % 3;
+      } else if (specMenuIndex == runTestRow - 2) {
+        timerHours = !timerHours;
       } else if (isCV && specMenuIndex == 0) {
         enterEdit(UiScreen::EDIT_SETPOINT_V, setVoltage);
       } else if (isCV && specMenuIndex == 1) {
@@ -437,7 +452,10 @@ void UiController::renderHome() {
   bool faulted = faultActive;
 
   display.drawLine(0, faulted ? "STATUS: FAULT" : "STATUS: OK");
-  snprintf(line, sizeof(line), "Int %.0fC Ext %.0fC", measTemp_Int[0], measTemp_Ext[0]);
+  if (isfinite(measTemp_Ext[0]))
+    snprintf(line, sizeof(line), "Int %.0fC Ext %.0fC", measTemp_Int[0], measTemp_Ext[0]);
+  else
+    snprintf(line, sizeof(line), "Int %.0fC Ext --", measTemp_Int[0]);
   display.drawLine(1, line);
 
   snprintf(line, sizeof(line), "Mode: %s", homeMode == ModeSel::CC ? "CC" : "CV");
@@ -448,7 +466,7 @@ void UiController::renderHome() {
 
 void UiController::renderSpecMenu() {
   bool isCV = (homeMode == ModeSel::CV);
-  char rows[8][24];
+  char rows[10][24];
   uint8_t count = 0;
 
   if (isCV) {
@@ -457,11 +475,15 @@ void UiController::renderSpecMenu() {
   } else {
     snprintf(rows[count++], 24, "Setpoint (I): %.2f", setCurrent);
   }
-  snprintf(rows[count++], 24, "Timer: %.0fs", setTime);
+  const uint32_t duration = (uint32_t)setTime;
+  snprintf(rows[count++], 24, "Timer: %02lu:%02lu:%02lu", (unsigned long)(duration / 3600),
+           (unsigned long)((duration / 60) % 60), (unsigned long)(duration % 60));
   snprintf(rows[count++], 24, "Max Temp: %.0fC", overTemperature);
   snprintf(rows[count++], 24, "Over Voltage: %.1f", overVoltage);
   snprintf(rows[count++], 24, "Over Current: %.1f", overCurrent);
   snprintf(rows[count++], 24, "Over Power: %.0f", overPower);
+  snprintf(rows[count++], 24, "Time unit: %s", timerHours ? "Hours" : "Seconds");
+  snprintf(rows[count++], 24, "I step: %s", currentStepIndex == 0 ? "0.01A Fine" : (currentStepIndex == 1 ? "0.10A" : "1.00A Coarse"));
   snprintf(rows[count++], 24, "Run Test");
 
   display.drawLine(0, "TEST PARAMETERS");
@@ -488,8 +510,24 @@ void UiController::renderEdit() {
   char line[24];
   display.drawLine(0, label);
   snprintf(line, sizeof(line), "%.2f %s", editBuffer, units);
+  if (currentScreen == UiScreen::EDIT_TIMER) {
+    const uint32_t duration = (uint32_t)editBuffer;
+    snprintf(line, sizeof(line), "%02lu:%02lu:%02lu", (unsigned long)(duration / 3600),
+             (unsigned long)((duration / 60) % 60), (unsigned long)(duration % 60));
+    display.drawLine(3, "Hours:Minutes:Seconds");
+    display.drawLine(4, timerHours ? "Step: 1 hour" : "Step: 5 seconds");
+    display.drawLine(5, "Maximum: 24 hours");
+  }
   display.drawLine(2, line);
-  display.drawLine(5, "Confirm=save Back=cancel");
+  if (currentScreen == UiScreen::EDIT_SETPOINT_I) {
+    display.drawLine(3, currentStepIndex == 0 ? "Step: 0.01 A (10 mA)" : (currentStepIndex == 1 ? "Step: 0.10 A" : "Step: 1.00 A"));
+    display.drawLine(4, "Range: 0-30 A");
+  } else if (currentScreen == UiScreen::EDIT_SETPOINT_V) {
+    display.drawLine(3, "Step: 0.1 V");
+    display.drawLine(4, "Range: 0-30 V");
+  }
+  display.drawLine(6, "Confirm: save");
+  display.drawLine(7, "Back: cancel");
 }
 
 void UiController::renderRun() {
@@ -505,15 +543,28 @@ void UiController::renderRun() {
     display.drawLine(2, line);
     uint32_t remainMs = (uint32_t)(setTime * 1000.0f) > testTimeElapsed
                          ? (uint32_t)(setTime * 1000.0f) - testTimeElapsed : 0;
-    snprintf(line, sizeof(line), "Remain: %lus", (unsigned long)(remainMs / 1000));
+    const uint32_t remaining = remainMs / 1000;
+    snprintf(line, sizeof(line), "Remain: %02lu:%02lu:%02lu", (unsigned long)(remaining / 3600),
+             (unsigned long)((remaining / 60) % 60), (unsigned long)(remaining % 60));
     display.drawLine(3, line);
   } else if (runPage == 1) {
     display.drawLine(0, "RUN - Temps pg2/3");
-    snprintf(line, sizeof(line), "Int: %.0f %.0f %.0f", measTemp_Int[0], measTemp_Int[1], measTemp_Int[2]);
-    display.drawLine(1, line);
-    snprintf(line, sizeof(line), "Ext: %.0f %.0f %.0f %.0f",
-             measTemp_Ext[0], measTemp_Ext[1], measTemp_Ext[2], measTemp_Ext[3]);
-    display.drawLine(2, line);
+    for (uint8_t pair = 0; pair < 3; ++pair) {
+      const uint8_t i = pair * 2;
+      snprintf(line, sizeof(line), "I%u:%.1f I%u:%.1f", i + 1, measTemp_Int[i], i + 2, measTemp_Int[i + 1]);
+      display.drawLine(pair + 1, line);
+    }
+    for (uint8_t pair = 0; pair < 2; ++pair) {
+      const uint8_t i = pair * 2;
+      char a[8], b[8];
+      if (isfinite(measTemp_Ext[i])) snprintf(a, sizeof(a), "%.1f", measTemp_Ext[i]);
+      else snprintf(a, sizeof(a), "--");
+      if (isfinite(measTemp_Ext[i + 1])) snprintf(b, sizeof(b), "%.1f", measTemp_Ext[i + 1]);
+      else snprintf(b, sizeof(b), "--");
+      snprintf(line, sizeof(line), "E%u:%s E%u:%s", i + 1, a, i + 2, b);
+      display.drawLine(pair + 4, line);
+    }
+    display.drawLine(6, "I=internal E=ext (C)");
   } else {
     display.drawLine(0, "RUN - Legs pg3/3");
     snprintf(line, sizeof(line), "%.2f %.2f %.2f", measCurrent[0], measCurrent[1], measCurrent[2]);
@@ -543,7 +594,8 @@ void UiController::renderSummary(const TestSummary& s, uint8_t scroll) {
   snprintf(lines[4], 24, "I min/avg/max");
   snprintf(lines[5], 24, "%.2f/%.2f/%.2f", s.minCurrent, s.avgCurrent, s.maxCurrent);
   snprintf(lines[6], 24, "Max Int/Ext Temp");
-  snprintf(lines[7], 24, "%.0fC / %.0fC", s.maxIntTemp, s.maxExtTemp);
+  if (isfinite(s.maxExtTemp)) snprintf(lines[7], 24, "%.0fC / %.0fC", s.maxIntTemp, s.maxExtTemp);
+  else snprintf(lines[7], 24, "%.0fC / --", s.maxIntTemp);
   snprintf(lines[8], 24, "Fault: %s", faultReasonText(s.fault));
 
   display.drawLine(0, lines[0]);

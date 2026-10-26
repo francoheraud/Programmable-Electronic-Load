@@ -455,6 +455,7 @@ static bool ensureSd() {
 static void cmdSd(int argc, String argv[]) {
   String sub = argc >= 2 ? argv[1] : String("init");
   if (!ensureSd()) return;
+  if (sdLog.busy()) { Serial.println("SD writer busy; retry after run closes"); return; }
 
   if (sub == "init") {
     Serial.printf("SD mounted, %llu MB\n", SD.cardSize() / (1024ULL * 1024ULL));
@@ -488,7 +489,7 @@ static void cmdSd(int argc, String argv[]) {
       if (!sdLog.append(r)) { Serial.println("FAIL: sdLog.append()"); break; }
     }
     sdLog.endTest();
-    Serial.println("wrote 3 sample rows with the real logger (see the file name above); 'sd ls' to list");
+    Serial.println("queued sample rows; wait for SdLog: run closed before sd ls");
   } else if (sub == "ls") {
     File root = SD.open("/");
     if (!root) { Serial.println("FAIL: could not open root"); return; }
